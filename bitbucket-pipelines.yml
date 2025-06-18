@@ -1,0 +1,77 @@
+image: atlassian/default-image:3
+
+pipelines:
+  branches:
+    master:
+      - step:
+          name: 'image creation'
+          runs-on:
+              - 'linux.shell'
+              - 'self.hosted'
+              - 'mopid.runner'
+          script:
+            # - echo $(gcloud artifacts docker images list asia-south1-docker.pkg.dev/stable-arch-399612/mopid-auth-backend/mopid-auth-backend --include-tags --sort-by=~CREATE_TIME | awk 'NR==2 {print $3}' | sed 's/,//') > /home/mopid/VERSION.txt
+            - sudo aws ecr get-login-password --region ap-south-1 | sudo docker login --username AWS --password-stdin 741448914751.dkr.ecr.ap-south-1.amazonaws.com
+            - sudo aws ecr list-images --repository-name mopid/auth-backend-prod --region ap-south-1 --output json | jq -r '.imageIds[] | select(.imageTag != null) | .imageTag' | sort -V -r | head -n 1 > /home/mopid/VERSION.txt
+            - export VERSION=$(cat /home/mopid/VERSION.txt)
+            - export NEW_VERSION=$(/home/mopid/semver.sh $VERSION patch | sed 's/version=//')
+            # - gcloud auth print-access-token | sudo docker login -u oauth2accesstoken --password-stdin https://asia-south1-docker.pkg.dev
+            - sudo cp /home/mopid/mopid-backend-auth-prod/.env.prod ./app/config/
+            - sed -i 's|\(^ENV APP_ENV=\).*|\1PROD|' Dockerfile
+            - sed -i 's|\(^CMD \).*|\1["opentelemetry-instrument", "uvicorn", "app.main:app","--workers", "4", "--proxy-headers","--host", "0.0.0.0", "--port", "8000"]|' Dockerfile
+            - sudo docker build -t 741448914751.dkr.ecr.ap-south-1.amazonaws.com/mopid/auth-backend-prod:$NEW_VERSION .
+            - sudo docker push 741448914751.dkr.ecr.ap-south-1.amazonaws.com/mopid/auth-backend-prod:$NEW_VERSION
+            - echo "image built"
+      - step:
+          name: 'Deployment to Production'
+          runs-on:
+              - 'linux.shell'
+              - 'self.hosted'
+              - 'mopid.runner'
+          deployment: production
+          script:
+            # - gcloud container clusters get-credentials prod-cluster --region=asia-south1-c
+            - aws eks update-kubeconfig --region ap-south-1 --name mopid-prod-cluster
+            - kubectl config use-context arn:aws:eks:ap-south-1:741448914751:cluster/mopid-prod-cluster
+            - export VERSION=$(cat /home/mopid/VERSION.txt)
+            - export NEW_VERSION=$(/home/mopid/semver.sh $VERSION patch | sed 's/version=//')
+            - cd /home/mopid/helm-charts/
+            - helm upgrade -i mopid-auth-backend-$NEW_VERSION ./mopid-auth-backend/ --set image.tag=$NEW_VERSION --set master.podLabels.name=mopid-auth-backend-$NEW_VERSION
+            - /home/mopid/prod-deployment.sh mopid-auth-backend $NEW_VERSION
+            - sudo rm -rf /home/mopid/VERSION.txt
+            - echo "Deployment successful"
+    dev_v1:
+      - step:
+          name: 'image creation'
+          runs-on:
+              - 'linux.shell'
+              - 'self.hosted'
+              - 'mopid.runner'
+          script:
+            - sudo aws ecr get-login-password --region ap-south-1 | sudo docker login --username AWS --password-stdin 741448914751.dkr.ecr.ap-south-1.amazonaws.com
+            - sudo aws ecr list-images --repository-name mopid/auth-backend-dev --region ap-south-1 --output json | jq -r '.imageIds[] | select(.imageTag != null) | .imageTag' | sort -V -r | head -n 1 > /home/mopid/VERSION.txt
+            - export VERSION=$(cat /home/mopid/VERSION.txt)
+            - export NEW_VERSION=$(/home/mopid/semver.sh $VERSION patch | sed 's/version=//')
+            - sed -i 's|\(^ENV APP_ENV=\).*|\1DEV|' Dockerfile
+            - sed -i 's/configure_opentelemetry(app)//' app/main.py
+            - sudo docker build -t 741448914751.dkr.ecr.ap-south-1.amazonaws.com/mopid/auth-backend-dev:$NEW_VERSION .
+            - sudo docker push 741448914751.dkr.ecr.ap-south-1.amazonaws.com/mopid/auth-backend-dev:$NEW_VERSION
+            - echo "image built"
+      - step:
+          name: 'Deployment to Dev'
+          runs-on:
+              - 'linux.shell'
+              - 'self.hosted'
+              - 'mopid.runner'
+          deployment: staging
+          script:
+            - aws eks update-kubeconfig --region ap-south-1 --name mopid-dev-cluster
+            - kubectl config use-context arn:aws:eks:ap-south-1:741448914751:cluster/mopid-dev-cluster
+            - export VERSION=$(cat /home/mopid/VERSION.txt)
+            - export NEW_VERSION=$(/home/mopid/semver.sh $VERSION patch | sed 's/version=//')
+            - cd /home/mopid/helm-charts/
+            # - sudo aws ecr get-login-password --region ap-south-1 | sudo docker login --username AWS --password-stdin 741448914751.dkr.ecr.ap-south-1.amazonaws.com
+            - helm upgrade -i mopid-auth-backend-dev-$NEW_VERSION ./mopid-auth-backend-dev/ --set image.tag=$NEW_VERSION --set master.podLabels.name=mopid-auth-backend-dev-$NEW_VERSION
+            - /home/mopid/dev-deployment.sh mopid-auth-backend-dev $NEW_VERSION
+            - sudo rm -rf /home/mopid/VERSION.txt
+            - echo "Deployment successful"
